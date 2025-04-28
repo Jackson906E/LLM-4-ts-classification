@@ -94,7 +94,7 @@ class Model(nn.Module):
         if self.task_name == 'imputation' or self.task_name == 'anomaly_detection':
             self.projection = nn.Linear(
                 configs.d_model, configs.c_out, bias=True)
-        if self.task_name == 'classification':
+        if self.task_name == 'classification' or self.task_name == 'classification_llm':
             self.act = F.gelu
             self.dropout = nn.Dropout(configs.dropout)
             self.projection = nn.Linear(
@@ -180,7 +180,7 @@ class Model(nn.Module):
                       1, self.pred_len + self.seq_len, 1))
         return dec_out
 
-    def classification(self, x_enc, x_mark_enc):
+    def classification(self, x_enc, x_mark_enc, out_proj=True):
         # embedding
         enc_out = self.enc_embedding(x_enc, None)  # [B,T,C]
         # TimesNet
@@ -193,12 +193,14 @@ class Model(nn.Module):
         output = self.dropout(output)
         # zero-out padding embeddings
         output = output * x_mark_enc.unsqueeze(-1)
+        if not out_proj:
+            return output
         # (batch_size, seq_length * d_model)
         output = output.reshape(output.shape[0], -1)
         output = self.projection(output)  # (batch_size, num_classes)
         return output
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None, out_proj=True):
         if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
             dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
             return dec_out[:, -self.pred_len:, :]  # [B, L, D]
@@ -209,7 +211,7 @@ class Model(nn.Module):
         if self.task_name == 'anomaly_detection':
             dec_out = self.anomaly_detection(x_enc)
             return dec_out  # [B, L, D]
-        if self.task_name == 'classification':
-            dec_out = self.classification(x_enc, x_mark_enc)
+        if self.task_name == 'classification' or self.task_name == 'classification_llm':
+            dec_out = self.classification(x_enc, x_mark_enc, out_proj)
             return dec_out  # [B, N]
         return None

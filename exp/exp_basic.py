@@ -5,6 +5,7 @@ from models import Autoformer, Transformer, TimesNet, Nonstationary_Transformer,
     Koopa, TiDE, FreTS, TimeMixer, TSMixer, SegRNN, MambaSimple, TemporalFusionTransformer, SCINet, PAttn, TimeXer, \
     WPMixer, MultiPatchFormer
 
+from models import LLMRepresentation, WeightingNet
 
 class Exp_Basic(object):
     def __init__(self, args):
@@ -38,7 +39,7 @@ class Exp_Basic(object):
             'PAttn': PAttn,
             'TimeXer': TimeXer,
             'WPMixer': WPMixer,
-            'MultiPatchFormer': MultiPatchFormer
+            'MultiPatchFormer': MultiPatchFormer,
         }
         if args.model == 'Mamba':
             print('Please make sure you have successfully installed mamba_ssm')

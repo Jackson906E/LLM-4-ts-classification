@@ -44,7 +44,7 @@ def data_provider(args, flag):
             num_workers=args.num_workers,
             drop_last=drop_last)
         return data_set, data_loader
-    elif args.task_name == 'classification':
+    elif args.task_name == 'classification' or args.task_name == 'classification_llm':
         drop_last = False
         data_set = Data(
             args = args,
