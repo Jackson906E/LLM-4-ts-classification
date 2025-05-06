@@ -7,16 +7,27 @@ class LLMRepresentation(nn.Module):
         super().__init__()
         self.tokenizer = BertTokenizer.from_pretrained(model_name)
         self.bert = BertModel.from_pretrained(model_name)
-        self.projector = nn.Linear(self.bert.config.hidden_size, output_dim)
+        self.hidden_size = self.bert.config.hidden_size
+        self.projector = nn.Linear(self.hidden_size, output_dim)
+        
 
-    def forward(self, descriptions):
-        encoded = self.tokenizer(descriptions, padding=True, truncation=True, return_tensors='pt')
-        input_ids = encoded['input_ids'].to(self.projector.weight.device)
-        attention_mask = encoded['attention_mask'].to(self.projector.weight.device)
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        # cls_embed = outputs.last_hidden_state[:, 0, :]  # [CLS]
-        cls_embed = outputs.last_hidden_state
-        return self.projector(cls_embed)
+    def forward(self, descriptions=None, inputs_embeds=None, out_proj=True):
+        if descriptions is not None:
+            encoded = self.tokenizer(descriptions, padding=True, truncation=True, return_tensors='pt')
+            input_ids = encoded['input_ids'].to(self.projector.weight.device)
+            attention_mask = encoded['attention_mask'].to(self.projector.weight.device)
+            outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+            cls_embed = outputs.last_hidden_state
+            return self.projector(cls_embed)
+        elif inputs_embeds is not None:
+            max_len = self.bert.config.max_position_embeddings  # 默认 512
+            inputs_embeds = inputs_embeds[:, :max_len, :]
+            outputs = self.bert(inputs_embeds=inputs_embeds)
+            cls_embed = outputs.last_hidden_state
+            if out_proj:
+                return self.projector(cls_embed)
+            else:
+                return cls_embed
 
 
 

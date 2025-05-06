@@ -64,15 +64,16 @@ def contrastive_loss(time_rep, text_rep):
 
 
 class CrossAttention(nn.Module):
-    def __init__(self, d_model):
+    def __init__(self, args):
         super(CrossAttention, self).__init__()
+        d_model = args.d_model
         self.d_model = d_model
         self.fusion_layer = nn.Linear(d_model, d_model)
         self.mlp = nn.Sequential(
             nn.Linear(d_model, d_model*4),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(d_model*4, d_model)
+            nn.Linear(d_model*4, args.num_class)
         )
 
     def forward(self, time_rep, text_rep):
@@ -94,9 +95,19 @@ class CrossAttention(nn.Module):
 class Exp_Classification_LLM(Exp_Basic):
     def __init__(self, args):
         super(Exp_Classification_LLM, self).__init__(args)
-        self.llm_rep = LLMRepresentation(output_dim=self.args.d_model).to(self.device)
-        self.cross_attn = CrossAttention(self.args.d_model).to(self.device)
 
+        train_data, train_loader = self._get_data(flag='TRAIN')
+        self.enc_in = train_data.feature_df.shape[1]
+
+        self.llm_rep = LLMRepresentation(output_dim=self.args.d_model).to(self.device)
+        self.projector = nn.Linear(self.enc_in, self.llm_rep.hidden_size).to(self.device)
+        self.cls_head = nn.Sequential(
+            nn.Linear(self.llm_rep.hidden_size, self.args.d_model),
+            #nn.Linear(self.args.d_model, self.args.d_model),
+            nn.ReLU(),
+            nn.Linear(self.args.d_model, self.args.num_class)
+        ).to(self.device)
+        self.cross_attn = CrossAttention(self.args).to(self.device)
 
     def _build_model(self):
         # model input depends on data
@@ -137,17 +148,25 @@ class Exp_Classification_LLM(Exp_Basic):
                 padding_mask = padding_mask.float().to(self.device)
                 label = label.to(self.device)
 
-                descriptions = get_text_description(batch_x, self.args)
-                text_rep = self.llm_rep(descriptions)
-                time_rep = self.model(batch_x, padding_mask, None, None, out_proj=False)
+                # descriptions = get_text_description(batch_x, self.args)
+                # text_rep = self.llm_rep(descriptions)[:, 0, :]
 
-                outputs = self.cross_attn(time_rep, text_rep)
+                inputs_embeds = self.projector(batch_x)
+                text_rep = self.llm_rep(inputs_embeds=inputs_embeds, out_proj=True)[:, 0, :]
 
-                pred = outputs.detach().cpu()
+                time_rep, ts_output = self.model(batch_x, padding_mask, None, None, out_proj=False)
+
+                lm_outputs = self.cross_attn(time_rep, text_rep)
+                #lm_outputs = self.cls_head(text_rep)
+
+                final_pred = 0.8 * ts_output + 0.2 * lm_outputs
+                #final_pred = lm_outputs
+
+                pred = final_pred.detach().cpu()
                 loss = criterion(pred, label.long().squeeze().cpu())
                 total_loss.append(loss)
 
-                preds.append(outputs.detach())
+                preds.append(final_pred.detach())
                 trues.append(label)
 
         total_loss = np.average(total_loss)
@@ -162,71 +181,6 @@ class Exp_Classification_LLM(Exp_Basic):
         self.model.train()
         return total_loss, accuracy
 
-    # def train(self, setting):
-    #     train_data, train_loader = self._get_data(flag='TRAIN')
-    #     vali_data, vali_loader = self._get_data(flag='TEST')
-    #     test_data, test_loader = self._get_data(flag='TEST')
-
-    #     path = os.path.join(self.args.checkpoints, setting)
-    #     if not os.path.exists(path):
-    #         os.makedirs(path)
-
-    #     time_now = time.time()
-
-    #     train_steps = len(train_loader)
-    #     early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
-
-    #     model_optim = self._select_optimizer()
-    #     criterion = self._select_criterion()
-
-    #     for epoch in range(self.args.train_epochs):
-    #         iter_count = 0
-    #         train_loss = []
-
-    #         self.model.train()
-    #         epoch_time = time.time()
-
-    #         for i, (batch_x, label, padding_mask) in enumerate(train_loader):
-    #             iter_count += 1
-    #             model_optim.zero_grad()
-
-    #             batch_x = batch_x.float().to(self.device)
-    #             padding_mask = padding_mask.float().to(self.device)
-    #             label = label.to(self.device)
-
-    #             outputs = self.model(batch_x, padding_mask, None, None)
-    #             loss = criterion(outputs, label.long().squeeze(-1))
-    #             train_loss.append(loss.item())
-
-    #             if (i + 1) % 100 == 0:
-    #                 print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
-    #                 speed = (time.time() - time_now) / iter_count
-    #                 left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-    #                 print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
-    #                 iter_count = 0
-    #                 time_now = time.time()
-
-    #             loss.backward()
-    #             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0)
-    #             model_optim.step()
-
-    #         print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
-    #         train_loss = np.average(train_loss)
-    #         vali_loss, val_accuracy = self.vali(vali_data, vali_loader, criterion)
-    #         test_loss, test_accuracy = self.vali(test_data, test_loader, criterion)
-
-    #         print(
-    #             "Epoch: {0}, Steps: {1} | Train Loss: {2:.3f} Vali Loss: {3:.3f} Vali Acc: {4:.3f} Test Loss: {5:.3f} Test Acc: {6:.3f}"
-    #             .format(epoch + 1, train_steps, train_loss, vali_loss, val_accuracy, test_loss, test_accuracy))
-    #         early_stopping(-val_accuracy, self.model, path)
-    #         if early_stopping.early_stop:
-    #             print("Early stopping")
-    #             break
-
-    #     best_model_path = path + '/' + 'checkpoint.pth'
-    #     self.model.load_state_dict(torch.load(best_model_path))
-
-    #     return self.model
     def train(self, setting):
         train_data, train_loader = self._get_data(flag='TRAIN')
         vali_data, vali_loader = self._get_data(flag='TEST')
@@ -243,9 +197,10 @@ class Exp_Classification_LLM(Exp_Basic):
         # weighting_net = WeightingNet(input_dim=self.args.num_class).to(self.device)
         #cross_attn = CrossAttention(self.args.d_model).to(self.device)
 
-        optimizer_llm = torch.optim.Adam(self.llm_rep.parameters(), lr=self.args.learning_rate)
+        #optimizer_llm = torch.optim.Adam(self.llm_rep.parameters(), lr=self.args.learning_rate)
         optimizer_cross_attn = torch.optim.Adam(self.cross_attn.parameters(), lr=self.args.learning_rate)
-        # optimizer_weight = torch.optim.Adam(weighting_net.parameters(), lr=self.args.learning_rate)
+        optimizer_cls_head = torch.optim.Adam(self.cls_head.parameters(), lr=self.args.learning_rate)
+        optimizer_projector = torch.optim.Adam(self.projector.parameters(), lr=self.args.learning_rate)
 
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
 
@@ -266,92 +221,44 @@ class Exp_Classification_LLM(Exp_Basic):
                 # print('padding_mask shape:', padding_mask.shape)
                 
                 # 时间表示（用于结构完整）
-                time_rep = self.model(batch_x, padding_mask, None, None, out_proj=False)
+                time_rep, ts_output = self.model(batch_x, padding_mask, None, None, out_proj=False)
 
                 # 文本表示（图(a)模块结构，但不参与loss）
-                descriptions = get_text_description(batch_x, self.args)
-                text_rep = self.llm_rep(descriptions)
+                # descriptions = get_text_description(batch_x, self.args)
+                # text_rep = self.llm_rep(descriptions=descriptions)[:, 0, :]
 
-                # print('time_rep:', time_rep.shape)
-                # print('text_rep:', text_rep.shape)
+                inputs_embeds = self.projector(batch_x)
+                text_rep = self.llm_rep(inputs_embeds=inputs_embeds, out_proj=True)[:, 0, :]
 
-                # 计算cross attention，text_rep作为kv，time_rep作为q
-                # # 1. 计算attention scores (Q·K^T)
-                # attention_scores = torch.matmul(time_rep, text_rep.transpose(-2, -1)) / math.sqrt(self.args.d_model)
-                # # 2. 应用softmax得到attention weights
-                # attention_weights = torch.nn.functional.softmax(attention_scores, dim=-1)     
-                # # 3. 计算加权和得到context vector (weights·V)
-                # context_vector = torch.matmul(attention_weights, text_rep)
-                # # 4. 通过线性层降维回原始维度
-                # fusion_layer = nn.Linear(context_vector.size(-1), self.args.d_model).to(self.device)
+                lm_output = self.cross_attn(time_rep, text_rep)
+                #lm_output = self.cls_head(text_rep)
 
-                # fused_rep = fusion_layer(context_vector)
+                final_pred = 0.8 * ts_output + 0.2 * lm_output
+                #final_pred = lm_output
 
-                # # Mean Pooling
-                # fused_rep = fused_rep.mean(dim=1)
+                cls_loss = criterion(final_pred, labels.long().squeeze(-1))
 
-                # # 将fused_rep展平并通过MLP得到分类logits
-                # fused_rep = fused_rep.reshape(fused_rep.size(0), -1)  # 展平
-                # mlp = nn.Sequential(
-                #     nn.Linear(fused_rep.size(-1), fused_rep.size(-1)*4),
-                #     nn.ReLU(),
-                #     nn.Dropout(0.1),
-                #     nn.Linear(fused_rep.size(-1)*4, self.model.configs.num_class)
-                # ).to(self.device)
+                #ctr_loss = contrastive_loss(time_rep, text_rep)
+                ctr_loss = contrastive_loss(ts_output, lm_output)
+                #ctr_loss = 0
 
-                # pred = mlp(fused_rep)
-
-                # pred = time_rep
-
-                pred = self.cross_attn(time_rep, text_rep)
-
-                cls_loss = criterion(pred, labels.long().squeeze(-1))
-
-                ctr_loss = contrastive_loss(time_rep, text_rep)
-                # ctr_loss = 0
-
-                total_loss = cls_loss + 0.5 * ctr_loss
+                total_loss = cls_loss + 0.2 * ctr_loss
 
                 # print(f'cls_loss: {cls_loss:.4f}, contrastive_loss: {ctr_loss:.4f}')
 
                 model_optim.zero_grad()
                 optimizer_cross_attn.zero_grad()
-                optimizer_llm.zero_grad()
+                #optimizer_llm.zero_grad()
+                #optimizer_cls_head.zero_grad()
+                optimizer_projector.zero_grad()
 
                 total_loss.backward()
 
                 model_optim.step()
                 optimizer_cross_attn.step()
-                optimizer_llm.step()
-
-                # # 分类预测 + loss
-                # pred = self.model(batch_x, padding_mask, None, None)
-                # cls_loss = criterion(pred, labels.long().squeeze(-1))
-
-                # # 重加权模块（图(b)结构）
-                # ω_O, _ = weighting_net(pred.detach())  # 使用 detach 防止梯度泄露
-                # total_loss = ω_O.mean() * cls_loss
-
-                # model_optim.zero_grad()
-                # optimizer_llm.zero_grad()
-                # optimizer_weight.zero_grad()
-                # total_loss.backward()
-                # model_optim.step()
-                # optimizer_llm.step()
-
-                # # Bi-level：通过验证集更新权重模块
-                # with torch.no_grad():
-                #     vali_x, vali_y, vali_mask = next(iter(vali_loader))
-                #     vali_x = vali_x.float().to(self.device)
-                #     vali_y = vali_y.to(self.device)
-                #     vali_mask = vali_mask.float().to(self.device)
-                #     val_pred = self.model(vali_x, vali_mask, None, None)
-                #     val_loss = criterion(val_pred, vali_y.long().squeeze(-1))
-
-                # val_loss.requires_grad_(True)
-                # optimizer_weight.zero_grad()
-                # val_loss.backward()
-                # optimizer_weight.step()
+                #optimizer_llm.step()
+                #optimizer_cls_head.step()
+                optimizer_projector.step()
 
                 train_loss.append(total_loss.item())
 
@@ -381,6 +288,8 @@ class Exp_Classification_LLM(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
+        criterion = self._select_criterion()
+
         self.model.eval()
         with torch.no_grad():
             for i, (batch_x, label, padding_mask) in enumerate(test_loader):
@@ -388,22 +297,30 @@ class Exp_Classification_LLM(Exp_Basic):
                 padding_mask = padding_mask.float().to(self.device)
                 label = label.to(self.device)
 
-                descriptions = get_text_description(batch_x, self.args)
-                text_rep = self.llm_rep(descriptions)
-                time_rep = self.model(batch_x, padding_mask, None, None, out_proj=False)
+                # descriptions = get_text_description(batch_x, self.args)
+                # text_rep = self.llm_rep(descriptions)[:, 0, :]
 
-                outputs = self.cross_attn(time_rep, text_rep)
+                inputs_embeds = self.projector(batch_x)
+                text_rep = self.llm_rep(inputs_embeds=inputs_embeds, out_proj=True)[:, 0, :]
 
-                pred = outputs.detach().cpu()
-                loss = criterion(pred, label.long().squeeze().cpu())
-                total_loss.append(loss)
+                time_rep, ts_output = self.model(batch_x, padding_mask, None, None, out_proj=False)
 
-                preds.append(outputs.detach())
+                lm_outputs = self.cross_attn(time_rep, text_rep)
+                #lm_outputs = self.cls_head(text_rep)
+
+                final_pred = 0.8 * ts_output + 0.2 * lm_outputs
+                #final_pred = lm_outputs
+
+                #pred = outputs.detach().cpu()
+                #loss = criterion(pred, label.long().squeeze(-1).cpu())
+                #total_loss.append(loss)
+
+                preds.append(final_pred.detach())
                 trues.append(label)
 
         preds = torch.cat(preds, 0)
         trues = torch.cat(trues, 0)
-        print('test shape:', preds.shape, trues.shape)
+        # print('test shape:', preds.shape, trues.shape)
 
         probs = torch.nn.functional.softmax(preds)  # (total_samples, num_classes) est. prob. for each class and sample
         predictions = torch.argmax(probs, dim=1).cpu().numpy()  # (total_samples,) int class index for each sample

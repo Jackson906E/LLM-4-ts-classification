@@ -193,11 +193,13 @@ class Model(nn.Module):
         output = self.dropout(output)
         # zero-out padding embeddings
         output = output * x_mark_enc.unsqueeze(-1)
-        if not out_proj:
-            return output
+        
+        pre_proj = output
         # (batch_size, seq_length * d_model)
         output = output.reshape(output.shape[0], -1)
         output = self.projection(output)  # (batch_size, num_classes)
+        if not out_proj:
+            return pre_proj, output
         return output
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None, out_proj=True):
